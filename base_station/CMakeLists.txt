@@ -16,7 +16,7 @@ add_compile_options(-Wall
 
 add_executable(base_station src/main.cc)
 
-target_link_libraries(base_station hardware_gpio pico_stdlib pico_time)
+target_link_libraries(base_station hardware_gpio pico_stdlib pico_time pico_util)
 
 pico_enable_stdio_usb(base_station 1)
 

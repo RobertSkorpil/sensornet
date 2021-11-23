@@ -2,42 +2,19 @@
 #include <iostream>
 #include <atomic>
 #include <array>
+#include <variant>
+#include <vector>
 #include "pico/stdlib.h"
+#include "pico/util/queue.h"
 #include "hardware/gpio.h"
-#include "pico/queue.h"
 #include "../../common/include/message.h"
+
+#define DEBUG
 
 constexpr uint GPIO_RF = 6;
 constexpr uint GPIO_LED = 25;
 constexpr uint32_t EDGE_LO = 4;
 constexpr uint32_t EDGE_HI = 8;
-
-void print_message(const message *msg)
-{
-  printf("Total length: %d bytes\n", msg->total_length);
-  const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
-  int rem = msg->total_length - sizeof(message);
-  for(int p = 0; rem >= sizeof(msg_part); ++p)
-  {
-    const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
-    printf("Part: %d\n", p + 1);
-    printf("Length: %d\n", part->length);
-    printf("Type ID: %d\n", part->id);
-    curr_ptr += part->length;
-    rem -= part->length;
-
-    if(part->id == 0)
-    {
-      const msg_num *num = reinterpret_cast<const msg_num *>(part);
-      printf("Sample #: %d\n", num->num);
-    }
-    else if(part->id == 1)
-    {
-      const msg_temp *temp = reinterpret_cast<const msg_temp *>(part);
-      printf("Temperature: %lf°C\n", temp->temp / 16.0);
-    }
-  }
-}
 
 uint16_t crc16_update(uint16_t crc, uint8_t a)
 {
@@ -53,121 +30,295 @@ uint16_t crc16_update(uint16_t crc, uint8_t a)
   return crc;
 }
 
-struct rf_event
-{
-  uint32_t event_type;
-  int32_t time_diff;
+static queue_t event_q;
+using reset_t = std::monostate;
+using rf_event_t = std::variant<uint8_t, reset_t>;
 
-};
+static std::atomic<bool> print_times;
+static std::atomic<bool> resync;
+static std::vector<int16_t> times;
 
 void gpio_irq_callback(uint gpio, uint32_t events)
 {
   constexpr auto min_1_time = 70;
-  constexpr auto max_1_time = 400;
-  constexpr auto min_0_time = 550;
-  constexpr auto max_0_time = 1200;
+  constexpr auto max_1_time = 500;
+  constexpr auto min_0_time = 650;
+  constexpr auto max_0_time = 900;
+  constexpr auto min_silence_time = 200;
+  constexpr auto max_silence_time = 600;
 
-  static uint16_t crc_comp = 0xffff;
+  static bool listen = false;
+  static bool last_event_reset = true;
+  static uint8_t word_count = 0;
   static uint8_t word = 0;
   static uint8_t bits = 0;
 
-  static std::array<uint8_t, 256> recv_buffer;
-  static uint8_t *recv_next = recv_buffer.begin();
-  const message *msg = reinterpret_cast<const message *>(recv_buffer.data());
-
   static absolute_time_t time_last = 0;
-
-  absolute_time_t time_now = get_absolute_time();
-
-  if(events & EDGE_HI)
+  enum class state_t
   {
-    time_last = time_now;
-    return;
-  }
-    
-  int32_t time_diff = absolute_time_diff_us(time_last, time_now);
+    ZERO_0_0,
+    ZERO_0_1,
+    ZERO_0_2,
+    ZERO_0_3,
+    ONE_0,
+    ONE_1,
+    ONE_2,
+    ONE_3,
+    ZERO_1_0,
+    ZERO_1_1,
+    ZERO_1_2,
+    ZERO_1_3,
+    LISTEN,
+  };
+
+  static state_t state = state_t::ONE_0;
+  auto zero_expected = []()
+  {
+    return state < state_t::ONE_0 || (state >= state_t::ZERO_1_0 && state <= state_t::ZERO_1_3);
+  };
 
   static auto reset_word = [&]()
   {
     word = 0;
     bits = 0;
   };
-
   static auto reset = [&]()
   {
+#ifdef DEBUG
+    times.clear();
+    word_count = 0;
+#endif
     reset_word();
-    
-    auto count = recv_next - recv_buffer.begin();
-
-    recv_next = recv_buffer.begin();
-    crc_comp = 0xffff;
+    if(!last_event_reset)
+    {
+      auto event = rf_event_t { reset_t{} };
+      queue_try_add(&event_q, &event);
+      last_event_reset = true;
+    }
+    state = state_t::ONE_0;
   };
 
-  if(time_diff < 100)    
-    ;
-  else if(time_diff >= min_1_time && time_diff <= max_1_time)
+  absolute_time_t time_now = get_absolute_time();
+  int32_t time_diff = absolute_time_diff_us(time_last, time_now);
+  time_last = time_now;
+
+  if(events & EDGE_HI)
   {
-    word <<= 1;
-    word |= 0x1;
-    ++bits;
+#ifdef DEBUG
+    if(!print_times)
+      times.push_back(-time_diff);
+#endif
+
+    if(time_diff > max_silence_time || time_diff < min_silence_time)
+      reset();
+
+    return;
+  }
+
+#ifdef DEBUG
+  if(!print_times)
+    times.push_back(time_diff);
+#endif
+
+  if(time_diff >= min_1_time && time_diff <= max_1_time)
+  {
+    if(state == state_t::LISTEN)
+    {
+      word <<= 1;
+      word |= 0x1;
+      ++bits;
+    }
+    else if(!zero_expected())    
+      state = static_cast<state_t>(static_cast<int>(state) + 1);
+    else
+      reset();
   }
   else if(time_diff >= min_0_time && time_diff <= max_0_time)
   {
-    word <<= 1;
-    ++bits;
+    if(state == state_t::LISTEN)
+    {
+      word <<= 1;
+      ++bits;
+    }
+    else if(zero_expected())
+    {
+      if(state == state_t::ZERO_1_3)
+      {
+        auto event = rf_event_t { 0xe0 };
+        queue_try_add(&event_q, &event);
+        event = rf_event_t { 0xf0 };
+        queue_try_add(&event_q, &event);
+      }
+      state = static_cast<state_t>(static_cast<int>(state) + 1);
+      if(state == state_t::LISTEN)
+      {
+        listen = true;
+        state = state_t::ZERO_0;
+      }
+    }
+    else
+      reset();
   }
   else
     reset();
 
-  if(bits == 8)
+  if(state == state_t::LISTEN)
   {
-    *recv_next++ = word;
-    auto count = recv_next - recv_buffer.begin();
-
-    if(count < 4 || count <= msg->total_length)
-      crc_comp = crc16_update(crc_comp, word);
-
-    if(count == 2 && msg->eye != message::EYE)
-      reset();
-    else if(count >= 4)
+    if(bits == 8)
     {
-      if(msg->total_length + 2 > recv_buffer.size())
-      {
-        printf("Message too long");
-        reset();
-      }
-      else if(count == msg->total_length + 2)
-      {
-        uint16_t crc_recv = *reinterpret_cast<const uint16_t*>(recv_next - 2);
-        printf("CRC RECV %04d, COMP %04d\n", crc_recv, crc_comp);
-        if(crc_recv == crc_comp)
-          print_message(msg);
-        reset();
-      }
-      else if(count > msg->total_length + 2)
-      {
-        printf("Recieve overflow");
-        reset();
-      }
+#ifdef DEBUG
+      if(word_count == 28)
+        print_times = true;
+#endif      
+
+      auto event = rf_event_t { word };
+      queue_try_add(&event_q, &event);
+      reset_word();
+      ++word_count;
+    }
+  }
+}
+
+bool check_message(const message *msg)
+{
+  const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
+  int rem = msg->total_length - sizeof(message);
+  for(int p = 0; rem >= sizeof(msg_part); ++p)
+  {
+    const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
+    if(part->length < sizeof(msg_part) || part->length > rem)
+    {
+      printf("ERROR;TYPE:MALFORMED;\r\n");
+      return false;
     }
 
-    reset_word();
+    curr_ptr += part->length;
+    rem -= part->length;
   }
 
-  time_last = time_now;
+  if(rem)
+  {
+    printf("ERROR;TYPE:MALFORMED;\r\n");
+    return false;
+  }
+  return true;
+}
+
+void print_message(const message *msg)
+{
+  printf("MSG;");
+  const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
+  int rem = msg->total_length - sizeof(message);
+  for(int p = 0; rem >= sizeof(msg_part); ++p)
+  {
+    const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
+    curr_ptr += part->length;
+    rem -= part->length;
+
+    if(part->id == 0)
+    {
+      const msg_num *num = reinterpret_cast<const msg_num *>(part);
+      printf("SAMPLE:%d;", num->num);
+    }
+    else if(part->id == 1)
+    {
+      const msg_temp *temp = reinterpret_cast<const msg_temp *>(part);
+      printf("DALLASID:%016llX;", *reinterpret_cast<const uint64_t *>(temp->rom.bytes));
+      printf("TEMP:%.2lf;", temp->temp / 16.0);
+    }
+  }
+  printf("\r\n");
 }
 
 int main()
 {
   stdio_usb_init();
   std::ios::sync_with_stdio(false);
+
+  queue_init(&event_q, sizeof(rf_event_t), 128);
+
   gpio_init(GPIO_RF);
   gpio_init(GPIO_LED);
-  gpio_set_dir(GPIO_LED, GPIO_OUT);
-
+  gpio_set_dir(GPIO_LED, GPIO_OUT);  
   gpio_set_irq_enabled_with_callback(GPIO_RF, EDGE_LO | EDGE_HI, true, gpio_irq_callback);
 
-  for(;;);
+  static std::array<uint8_t, 256> recv_buffer;
+  static uint8_t *recv_next;
+  static uint16_t crc_comp;
+  const message *msg = reinterpret_cast<const message *>(recv_buffer.data());
+
+  auto reset = [&](){
+    recv_next = recv_buffer.begin();
+    crc_comp = 0xffff;
+  };
+  reset();
+
+  for(;;)
+  {
+    rf_event_t event;
+    queue_remove_blocking(&event_q, &event);
+
+#ifdef DEBUG    
+    if(print_times)
+    {
+      printf("DEBUG;");
+      for(auto t : times)
+        printf("%d;", t);
+      printf("\r\n");
+      print_times = false;
+    }
+    if(resync)
+    {
+      printf("DEBUG;RESYNC;\r\n");
+      resync = false;
+    }
+#endif 
+
+    std::visit(
+        [&](auto &&arg)
+        {
+          using T = std::decay_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, reset_t>)
+            reset();
+          else if constexpr (std::is_same_v<T, uint8_t>)
+          {
+            *recv_next++ = arg;
+            auto length = recv_next - recv_buffer.begin();
+            if(length < 4 || length <= msg->total_length)
+              crc_comp = crc16_update(crc_comp, arg);
+
+            else if(length == 2 && msg->eye != message::EYE)
+              reset();
+            else if(length >= 4)
+            {
+              if(msg->total_length + 2 > recv_buffer.size())
+              {
+                printf("ERROR;TYPE:BUFSMALL;\r\n");
+                reset();
+              }
+              else if(length == msg->total_length + 2)
+              {
+                uint16_t crc_recv = *reinterpret_cast<const uint16_t*>(recv_next - 2);
+                if(crc_recv == crc_comp)
+                {
+                  if(check_message(msg))
+                    print_message(msg);
+                }
+                else
+                  printf("ERROR;TYPE:CRC;RECV:%04X;COMP:%04X;\r\n", crc_recv, crc_comp);
+                  
+                reset();
+              }
+              else if(length > msg->total_length + 2)
+              {
+                printf("ERROR;TYPE:TOOLONG;\r\n");
+                reset();
+              }
+            }
+          }
+        },  
+        event);
+  }        
 
   return 0;
 }

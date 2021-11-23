@@ -1,0 +1,6 @@
+bin/
+obj/
+build/
+!bin/.keep
+!obj/.keep
+!build/.keep

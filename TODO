@@ -1,0 +1,5 @@
+1) Schema
+2) Pull-up resistor na ^RESET ma byt mezi 30K-60K
+3) Proud pri power-down s WDT ma byt ~4uA. Namereno 48uA. 
+   Zkusit vypnout digitalni vstupy? Zkontrolovat ze neni aktivni
+   pull-up na 1-Wire. Zkontrolovat hodnoty pull-up/down resistoru.

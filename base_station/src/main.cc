@@ -9,7 +9,7 @@
 #include "hardware/gpio.h"
 #include "../../common/include/message.h"
 
-#define DEBUG
+//#define DEBUG
 
 constexpr uint GPIO_RF = 6;
 constexpr uint GPIO_LED = 25;
@@ -31,35 +31,33 @@ uint16_t crc16_update(uint16_t crc, uint8_t a)
 }
 
 static queue_t event_q;
-using reset_t = std::monostate;
-using rf_event_t = std::variant<uint8_t, reset_t>;
-
-static std::atomic<bool> print_times;
-static std::atomic<bool> resync;
-static std::vector<int16_t> times;
+struct reset_t {};
+struct listen_t {};
+using rf_event_t = std::variant<uint8_t, reset_t, listen_t>;
 
 void gpio_irq_callback(uint gpio, uint32_t events)
 {
-  constexpr auto min_1_time = 70;
-  constexpr auto max_1_time = 500;
+  constexpr auto min_1_time = 250;
+  constexpr auto max_1_time = 450;
   constexpr auto min_0_time = 650;
   constexpr auto max_0_time = 900;
   constexpr auto min_silence_time = 200;
-  constexpr auto max_silence_time = 600;
+  constexpr auto max_silence_time = 500;
 
-  static bool listen = false;
-  static bool last_event_reset = true;
-  static uint8_t word_count = 0;
   static uint8_t word = 0;
   static uint8_t bits = 0;
 
   static absolute_time_t time_last = 0;
+  enum class reset_reason_t
+  {
+    SILENCE_TOO_LONG,
+    SILENCE_TOO_SHORT,
+    BAD_PULSE_LENGTH,
+    OTHER,
+  };
+
   enum class state_t
   {
-    ZERO_0_0,
-    ZERO_0_1,
-    ZERO_0_2,
-    ZERO_0_3,
     ONE_0,
     ONE_1,
     ONE_2,
@@ -82,18 +80,16 @@ void gpio_irq_callback(uint gpio, uint32_t events)
     word = 0;
     bits = 0;
   };
-  static auto reset = [&]()
+  static auto reset = [&](reset_reason_t reason)
   {
-#ifdef DEBUG
-    times.clear();
-    word_count = 0;
-#endif
     reset_word();
-    if(!last_event_reset)
+    if(state == state_t::LISTEN)
     {
       auto event = rf_event_t { reset_t{} };
       queue_try_add(&event_q, &event);
-      last_event_reset = true;
+#ifdef DEBUG
+      printf("DEBUG;RESET=%d;\n", reason);
+#endif
     }
     state = state_t::ONE_0;
   };
@@ -104,21 +100,14 @@ void gpio_irq_callback(uint gpio, uint32_t events)
 
   if(events & EDGE_HI)
   {
-#ifdef DEBUG
-    if(!print_times)
-      times.push_back(-time_diff);
-#endif
 
-    if(time_diff > max_silence_time || time_diff < min_silence_time)
-      reset();
+    if(time_diff > max_silence_time)
+      reset(reset_reason_t::SILENCE_TOO_LONG);
+    else if(time_diff < min_silence_time)
+      reset(reset_reason_t::SILENCE_TOO_SHORT);
 
     return;
   }
-
-#ifdef DEBUG
-  if(!print_times)
-    times.push_back(time_diff);
-#endif
 
   if(time_diff >= min_1_time && time_diff <= max_1_time)
   {
@@ -131,7 +120,7 @@ void gpio_irq_callback(uint gpio, uint32_t events)
     else if(!zero_expected())    
       state = static_cast<state_t>(static_cast<int>(state) + 1);
     else
-      reset();
+      reset(reset_reason_t::OTHER);
   }
   else if(time_diff >= min_0_time && time_diff <= max_0_time)
   {
@@ -142,39 +131,32 @@ void gpio_irq_callback(uint gpio, uint32_t events)
     }
     else if(zero_expected())
     {
-      if(state == state_t::ZERO_1_3)
+      auto prev_state = state;
+      if(state != state_t::LISTEN)
+        state = static_cast<state_t>(static_cast<int>(state) + 1);
+      if(state == state_t::LISTEN && prev_state != state_t::LISTEN)
       {
-        auto event = rf_event_t { 0xe0 };
+        auto event = rf_event_t { listen_t{} };
+        queue_try_add(&event_q, &event);
+        event = rf_event_t { 0xe0 };
         queue_try_add(&event_q, &event);
         event = rf_event_t { 0xf0 };
         queue_try_add(&event_q, &event);
       }
-      state = static_cast<state_t>(static_cast<int>(state) + 1);
-      if(state == state_t::LISTEN)
-      {
-        listen = true;
-        state = state_t::ZERO_0;
-      }
     }
     else
-      reset();
+      reset(reset_reason_t::OTHER);
   }
   else
-    reset();
+    reset(reset_reason_t::BAD_PULSE_LENGTH);
 
   if(state == state_t::LISTEN)
   {
     if(bits == 8)
     {
-#ifdef DEBUG
-      if(word_count == 28)
-        print_times = true;
-#endif      
-
       auto event = rf_event_t { word };
       queue_try_add(&event_q, &event);
       reset_word();
-      ++word_count;
     }
   }
 }
@@ -182,13 +164,13 @@ void gpio_irq_callback(uint gpio, uint32_t events)
 bool check_message(const message *msg)
 {
   const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
-  int rem = msg->total_length - sizeof(message);
+  size_t rem = msg->total_length - sizeof(message);
   for(int p = 0; rem >= sizeof(msg_part); ++p)
   {
     const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
     if(part->length < sizeof(msg_part) || part->length > rem)
     {
-      printf("ERROR;TYPE:MALFORMED;\r\n");
+      printf("ERROR;TYPE:MALFORMED;\n");
       return false;
     }
 
@@ -198,7 +180,7 @@ bool check_message(const message *msg)
 
   if(rem)
   {
-    printf("ERROR;TYPE:MALFORMED;\r\n");
+    printf("ERROR;TYPE:MALFORMED;\n");
     return false;
   }
   return true;
@@ -208,7 +190,7 @@ void print_message(const message *msg)
 {
   printf("MSG;");
   const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
-  int rem = msg->total_length - sizeof(message);
+  size_t rem = msg->total_length - sizeof(message);
   for(int p = 0; rem >= sizeof(msg_part); ++p)
   {
     const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
@@ -226,8 +208,13 @@ void print_message(const message *msg)
       printf("DALLASID:%016llX;", *reinterpret_cast<const uint64_t *>(temp->rom.bytes));
       printf("TEMP:%.2lf;", temp->temp / 16.0);
     }
+    else if(part->id == 2)
+    {
+      const msg_power *power = reinterpret_cast<const msg_power *>(part);
+      printf("VOLT:%.2lf;", power->voltage / 256.0 * 3.3);
+    }
   }
-  printf("\r\n");
+  printf("\n");
 }
 
 int main()
@@ -248,6 +235,15 @@ int main()
   const message *msg = reinterpret_cast<const message *>(recv_buffer.data());
 
   auto reset = [&](){
+#ifdef DEBUG    
+    if(recv_next != recv_buffer.begin())
+    {
+      printf("DEBUG;RESET;DATA:");
+      for(auto i = recv_buffer.begin(); i < recv_next; ++i)
+        printf("%02X ", *i);
+      printf(";\n");
+    }
+#endif
     recv_next = recv_buffer.begin();
     crc_comp = 0xffff;
   };
@@ -258,30 +254,21 @@ int main()
     rf_event_t event;
     queue_remove_blocking(&event_q, &event);
 
-#ifdef DEBUG    
-    if(print_times)
-    {
-      printf("DEBUG;");
-      for(auto t : times)
-        printf("%d;", t);
-      printf("\r\n");
-      print_times = false;
-    }
-    if(resync)
-    {
-      printf("DEBUG;RESYNC;\r\n");
-      resync = false;
-    }
-#endif 
-
     std::visit(
         [&](auto &&arg)
         {
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, reset_t>)
             reset();
+#ifdef DEBUG            
+          else if constexpr (std::is_same_v<T, listen_t>)
+            printf("DEBUG:LISTEN\n");
+#endif            
           else if constexpr (std::is_same_v<T, uint8_t>)
           {
+#ifdef DEBUG          
+            printf("DEBUG;DATA:%02X;\n", arg);
+#endif            
             *recv_next++ = arg;
             auto length = recv_next - recv_buffer.begin();
             if(length < 4 || length <= msg->total_length)
@@ -291,9 +278,9 @@ int main()
               reset();
             else if(length >= 4)
             {
-              if(msg->total_length + 2 > recv_buffer.size())
+              if(size_t(msg->total_length + 2) > recv_buffer.size())
               {
-                printf("ERROR;TYPE:BUFSMALL;\r\n");
+                printf("ERROR;TYPE:BUFSMALL;\n");
                 reset();
               }
               else if(length == msg->total_length + 2)
@@ -305,13 +292,13 @@ int main()
                     print_message(msg);
                 }
                 else
-                  printf("ERROR;TYPE:CRC;RECV:%04X;COMP:%04X;\r\n", crc_recv, crc_comp);
+                  printf("ERROR;TYPE:CRC;RECV:%04X;COMP:%04X;\n", crc_recv, crc_comp);
                   
                 reset();
               }
               else if(length > msg->total_length + 2)
               {
-                printf("ERROR;TYPE:TOOLONG;\r\n");
+                printf("ERROR;TYPE:TOOLONG;\n");
                 reset();
               }
             }

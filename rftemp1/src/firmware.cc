@@ -1,6 +1,11 @@
 #include <string.h>
+#include <stdlib.h>
+#include <avr/builtins.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
+#include <avr/wdt.h>
+#include <avr/power.h>
+#include <avr/sleep.h>
 #include <util/delay.h>
 #include <util/crc16.h>
 #include <../../common/include/message.h>
@@ -172,8 +177,13 @@ static uint16_t read_ds18b20_temp()
 
 static void rf_ring()
 {          
-  rf_tx.set();
-  _delay_us(1500);
+  for(int i = 0; i < 100; ++i)
+  {
+    rf_tx.reset();
+    _delay_us(200);
+    rf_tx.set();
+    _delay_us(200);
+  }
   rf_tx.reset();
   _delay_us(1000);
 }
@@ -193,14 +203,55 @@ static void rf_send_message(const message_rftemp1 &msg)
   }
   rf_send(crc);
   rf_send(crc >> 8);
-  rf_send(0xa0);
-  rf_send(0xb0);
 
   rf_tx.reset();
 }
 
+static uint8_t measure_voltage()
+{
+  ADMUX = (1 << REFS1) | // Internal 1.1V Reference
+          (1 << ADLAR) | //Left Adjust result
+          (1 << MUX0); //Measure ADC1 (PB2)
+
+  DIDR0 = (1 << ADC1D); //Disable digital input PB2
+
+  ADCSRA = (1 << ADEN) | //Enable ADC
+           (1 << ADSC) | //Start conversion
+           (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); //1:128 ADC clock division
+  do
+  {
+/*    MCUCR = (1 << SE) | //Sleep enable
+            (1 << SM0); // ADC Noise Reduction + Start ADC conversion
+    __builtin_avr_sleep();*/
+  }while(ADCSRA & (1 << ADSC));
+
+  uint8_t value = ADCH;
+
+  ADCSRA = 0; //Disable ADC
+
+  return value;
+}
+
+ISR(WDT_vect)
+{}
+
+void sleep(int delay)
+{
+  delay = (delay + 7) / 8;
+  for(int i = 0; i < (delay + 7 / 8); ++i)
+  {
+    WDTCR = (1 << WDIE) | //Watchdog timeout interrupt enable
+            (1 << WDP3) | (1 << WDP0); //8s timeout
+    wdt_reset();
+    sei();
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+    sleep_mode();
+  }
+}
+
 int __attribute__((noreturn)) main()
 {    
+  sei();
   rf_enable.set();
   message_rftemp1 msg;
   msg.eye = message::EYE;
@@ -210,20 +261,32 @@ int __attribute__((noreturn)) main()
   msg.num.num = 0;
   msg.temp.id = msg_temp::ID;
   msg.temp.length = sizeof(msg.temp);
+  msg.power.id = msg_power::ID;
+  msg.power.length = sizeof(msg.power);
+  msg.power.reserved = 0;
 
+  bool rand_seeded = false;
   for(;;)
   {
+    msg.power.voltage = measure_voltage();
+  
     msg.temp.rom = read_rom();
+    if(!rand_seeded)
+    {
+      srand(*reinterpret_cast<uint32_t *>(msg.temp.rom.bytes));
+      rand_seeded = true;
+    }
+
     msg.temp.temp = read_ds18b20_temp();
 
-    for(int i = 0; i < 3; ++i)
-    {
-      rf_send_message(msg);
-      rf_send_message(msg);
-      rf_send_message(msg);
-      _delay_ms(1000);
-    }
-    _delay_ms(60000);
+    rf_send_message(msg);
+    _delay_ms(500);
+    rf_send_message(msg);
+    _delay_ms(1000);
+    rf_send_message(msg);
+    int delay = 30 + rand() / 1024;
+    sleep(delay);
+
     ++msg.num.num;
   }
 }

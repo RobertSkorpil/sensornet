@@ -20,6 +20,13 @@ struct msg_temp : msg_part
   uint16_t temp;
 };
 
+struct msg_power : msg_part
+{
+  static constexpr uint16_t ID = 0x0002;
+  uint8_t voltage; //0 = 0, 255 >= 3.3V
+  uint8_t reserved;
+};
+
 struct message
 {
   static constexpr uint16_t EYE = 0xf0e0;
@@ -31,5 +38,6 @@ struct message_rftemp1 : message
 {
   msg_num num;
   msg_temp temp;
+  msg_power power;
 };
 

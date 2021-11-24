@@ -3,3 +3,4 @@
 3) Proud pri power-down s WDT ma byt ~4uA. Namereno 48uA. 
    Zkusit vypnout digitalni vstupy? Zkontrolovat ze neni aktivni
    pull-up na 1-Wire. Zkontrolovat hodnoty pull-up/down resistoru.
+4) Pouzit Power Reduction Register na vypnuty Timer0, Timer1 a USI

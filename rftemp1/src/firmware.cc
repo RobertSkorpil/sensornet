@@ -238,7 +238,7 @@ ISR(WDT_vect)
 void sleep(int delay)
 {
   delay = (delay + 7) / 8;
-  for(int i = 0; i < (delay + 7 / 8); ++i)
+  for(int i = 0; i < delay; ++i)
   {
     WDTCR = (1 << WDIE) | //Watchdog timeout interrupt enable
             (1 << WDP3) | (1 << WDP0); //8s timeout

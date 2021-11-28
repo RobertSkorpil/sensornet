@@ -164,8 +164,8 @@ void gpio_irq_callback(uint gpio, uint32_t events)
 bool check_message(const message *msg)
 {
   const uint8_t *curr_ptr = reinterpret_cast<const uint8_t *>(msg + 1);
-  size_t rem = msg->total_length - sizeof(message);
-  for(int p = 0; rem >= sizeof(msg_part); ++p)
+  int rem = msg->total_length - sizeof(message);
+  for(int p = 0; rem >= int(sizeof(msg_part)); ++p)
   {
     const msg_part *part = reinterpret_cast<const msg_part *>(curr_ptr);
     if(part->length < sizeof(msg_part) || part->length > rem)
@@ -259,11 +259,14 @@ int main()
         {
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, reset_t>)
+          {
             reset();
-#ifdef DEBUG            
+            gpio_put(GPIO_LED, false);
+          }
           else if constexpr (std::is_same_v<T, listen_t>)
-            printf("DEBUG:LISTEN\n");
-#endif            
+          {
+            gpio_put(GPIO_LED, true);
+          }
           else if constexpr (std::is_same_v<T, uint8_t>)
           {
 #ifdef DEBUG          

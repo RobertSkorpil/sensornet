@@ -17,7 +17,7 @@ struct msg_temp : msg_part
 {
   static constexpr uint16_t ID = 0x0001;
   rom_t rom;
-  uint16_t temp;
+  int16_t temp;
 };
 
 struct msg_power : msg_part

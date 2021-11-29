@@ -13,6 +13,8 @@
 
 constexpr uint GPIO_RF = 6;
 constexpr uint GPIO_LED = 25;
+constexpr uint GPIO_LED2 = 15;
+constexpr uint GPIO_LED3 = 16;
 constexpr uint32_t EDGE_LO = 4;
 constexpr uint32_t EDGE_HI = 8;
 
@@ -145,7 +147,9 @@ void gpio_irq_callback(uint gpio, uint32_t events)
       }
     }
     else
+    {
       reset(reset_reason_t::OTHER);
+    }
   }
   else
     reset(reset_reason_t::BAD_PULSE_LENGTH);
@@ -226,7 +230,11 @@ int main()
 
   gpio_init(GPIO_RF);
   gpio_init(GPIO_LED);
+  gpio_init(GPIO_LED2);
+  gpio_init(GPIO_LED3);
   gpio_set_dir(GPIO_LED, GPIO_OUT);  
+  gpio_set_dir(GPIO_LED2, GPIO_OUT);  
+  gpio_set_dir(GPIO_LED3, GPIO_OUT);  
   gpio_set_irq_enabled_with_callback(GPIO_RF, EDGE_LO | EDGE_HI, true, gpio_irq_callback);
 
   static std::array<uint8_t, 256> recv_buffer;
@@ -277,7 +285,7 @@ int main()
             if(length < 4 || length <= msg->total_length)
               crc_comp = crc16_update(crc_comp, arg);
 
-            else if(length == 2 && msg->eye != message::EYE)
+            if(length == 2 && msg->eye != message::EYE)
               reset();
             else if(length >= 4)
             {
@@ -291,8 +299,14 @@ int main()
                 uint16_t crc_recv = *reinterpret_cast<const uint16_t*>(recv_next - 2);
                 if(crc_recv == crc_comp)
                 {
+                  gpio_put(GPIO_LED2, true);
                   if(check_message(msg))
+                  {
+                    gpio_put(GPIO_LED3, true);
                     print_message(msg);
+                  }
+                  gpio_put(GPIO_LED2, false);
+                  gpio_put(GPIO_LED3, false);
                 }
                 else
                   printf("ERROR;TYPE:CRC;RECV:%04X;COMP:%04X;\n", crc_recv, crc_comp);

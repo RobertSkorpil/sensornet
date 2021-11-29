@@ -27,24 +27,29 @@ string_view make_sv(const T &v)
 struct rftemp1_msg
 {
   uint64_t id;
+  uint32_t sample;
   double temperature;
   double voltage;
 
-  bool operator ==(const rftemp1_msg &) const & = default;
+  //bool operator ==(const rftemp1_msg &) const & = default; :(
+  bool operator ==(const rftemp1_msg &b) const &
+  {
+    return std::tie(id, temperature, voltage, sample) == std::tie(b.id, b.temperature, b.voltage, b.sample);
+  }
 };
 
 
 string make_insert(const rftemp1_msg &msg)
 {
   char buffer[1024];
-  sprintf(buffer, "INSERT INTO temp_sensor_value (id, temperature) values (%" PRIu64 ", %lf);",
+  sprintf(buffer, "INSERT INTO temp_sensor_value (id, temperature) values (%" PRId64 ", %lf);",
          msg.id, msg.temperature);
   return buffer;
 }
 
 optional<rftemp1_msg> parse_rftemp1(const map<string, string> values)
 {
-  if(!values.count("DALLASID") || !values.count("TEMP") || !values.count("VOLT"))
+  if(!values.count("DALLASID") || !values.count("TEMP") || !values.count("VOLT") || !values.count("SAMPLE"))
     return {};
 
   rftemp1_msg msg;
@@ -55,14 +60,16 @@ optional<rftemp1_msg> parse_rftemp1(const map<string, string> values)
     return {};
   if(!sscanf(values.at("VOLT").c_str(), "%lf", &msg.voltage))
     return {};
+  if(!sscanf(values.at("SAMPLE").c_str(), "%" SCNu32, &msg.sample))
+    return {};
   
   return msg;
 }
 
 int main()
 {
-  const regex rx_msg("^MSG;([A-Z]+:[0-9A-Z.]+;)+$");
-  const regex rx_part("([A-Z]+):([0-9A-Z.]+);");
+  const regex rx_msg("^MSG;([A-Z]+:-?[0-9A-Z.]+;)+$");
+  const regex rx_part("([A-Z]+):(-?[0-9A-Z.]+);");
 
   map<uint64_t, rftemp1_msg> last_msg;
   for(string line; getline(cin, line); )
@@ -80,9 +87,8 @@ int main()
       if(last_msg[msg->id] == *msg)
         continue;
       last_msg[msg->id] = *msg;
+      std::cout << make_insert(*msg) << "\n";
     }
-
-    std::cout << make_insert(*msg) << "\n";
   }
   return 0;
 }

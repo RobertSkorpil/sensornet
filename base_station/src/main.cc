@@ -10,6 +10,7 @@
 #include "../../common/include/message.h"
 
 //#define DEBUG
+//#define DEBUG2
 
 constexpr uint GPIO_RF = 6;
 constexpr uint GPIO_LED = 25;
@@ -40,10 +41,10 @@ using rf_event_t = std::variant<uint8_t, reset_t, listen_t>;
 void gpio_irq_callback(uint gpio, uint32_t events)
 {
   constexpr auto min_1_time = 250;
-  constexpr auto max_1_time = 450;
+  constexpr auto max_1_time = 500;
   constexpr auto min_0_time = 650;
-  constexpr auto max_0_time = 900;
-  constexpr auto min_silence_time = 200;
+  constexpr auto max_0_time = 950;
+  constexpr auto min_silence_time = 150;
   constexpr auto max_silence_time = 500;
 
   static uint8_t word = 0;
@@ -99,6 +100,10 @@ void gpio_irq_callback(uint gpio, uint32_t events)
   absolute_time_t time_now = get_absolute_time();
   int32_t time_diff = absolute_time_diff_us(time_last, time_now);
   time_last = time_now;
+
+#ifdef DEBUG2
+    printf("DEBUG;T=%d;\n", time_diff);
+#endif
 
   if(events & EDGE_HI)
   {

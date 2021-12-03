@@ -3,7 +3,6 @@
 #include <map>
 #include <regex>
 #include <string>
-#include <string_view>
 #include <cinttypes>
 
 using std::map;
@@ -14,15 +13,7 @@ using std::regex_search;
 using std::smatch;
 using std::getline;
 using std::cin;
-using std::string_view;
 using std::optional;
-
-template<typename T>
-string_view make_sv(const T &v)
-{
-  return string_view(static_cast<const char *>(v.first.base()),  //TODO: UD?
-                          v.second - v.first);
-}
 
 struct rftemp1_msg
 {
@@ -42,8 +33,8 @@ struct rftemp1_msg
 string make_insert(const rftemp1_msg &msg)
 {
   char buffer[1024];
-  sprintf(buffer, "INSERT INTO temp_sensor_value (id, temperature) values (%" PRId64 ", %lf);",
-         msg.id, msg.temperature);
+  sprintf(buffer, "INSERT INTO temp_sensor_value (id, temperature, voltage) values (%" PRId64 ", %lf, %lf);",
+         msg.id, msg.temperature, msg.voltage);
   return buffer;
 }
 

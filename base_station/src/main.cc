@@ -11,6 +11,7 @@
 
 //#define DEBUG
 //#define DEBUG2
+//#define LIGHTS
 
 constexpr uint GPIO_RF = 6;
 constexpr uint GPIO_LED = 25;
@@ -234,12 +235,14 @@ int main()
   queue_init(&event_q, sizeof(rf_event_t), 128);
 
   gpio_init(GPIO_RF);
+#ifdef LIGHTS
   gpio_init(GPIO_LED);
   gpio_init(GPIO_LED2);
   gpio_init(GPIO_LED3);
   gpio_set_dir(GPIO_LED, GPIO_OUT);  
   gpio_set_dir(GPIO_LED2, GPIO_OUT);  
   gpio_set_dir(GPIO_LED3, GPIO_OUT);  
+#endif  
   gpio_set_irq_enabled_with_callback(GPIO_RF, EDGE_LO | EDGE_HI, true, gpio_irq_callback);
 
   static std::array<uint8_t, 256> recv_buffer;
@@ -274,11 +277,15 @@ int main()
           if constexpr (std::is_same_v<T, reset_t>)
           {
             reset();
+#ifdef LIGHTS            
             gpio_put(GPIO_LED, false);
+#endif
           }
           else if constexpr (std::is_same_v<T, listen_t>)
           {
+#ifdef LIGHTS          
             gpio_put(GPIO_LED, true);
+#endif          
           }
           else if constexpr (std::is_same_v<T, uint8_t>)
           {
@@ -304,14 +311,20 @@ int main()
                 uint16_t crc_recv = *reinterpret_cast<const uint16_t*>(recv_next - 2);
                 if(crc_recv == crc_comp)
                 {
+#ifdef LIGHTS                  
                   gpio_put(GPIO_LED2, true);
+#endif
                   if(check_message(msg))
                   {
+#ifdef LIGHTS                  
                     gpio_put(GPIO_LED3, true);
+#endif
                     print_message(msg);
                   }
+#ifdef LIGHTS                  
                   gpio_put(GPIO_LED2, false);
                   gpio_put(GPIO_LED3, false);
+#endif
                 }
                 else
                   printf("ERROR;TYPE:CRC;RECV:%04X;COMP:%04X;\n", crc_recv, crc_comp);
